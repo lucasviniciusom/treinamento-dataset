@@ -1,0 +1,35 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: ../docker/Dockerfile.backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./models:/app/models
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - ml-app-network
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../docker/Dockerfile.frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      # 🚫 Removido: sobrescrevia node_modules e quebrava build
+      # - /app/node_modules
+    depends_on:
+      - backend
+    networks:
+      - ml-app-network
+    restart: unless-stopped
+
+networks:
+  ml-app-network:
+    driver: bridge
