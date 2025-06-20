@@ -15,12 +15,15 @@ const Results = ({ modelResults, handleDownloadResults, setActiveStep }) => {
     );
   }
 
-  const { metrics = {}, model_info = {}, predictions = [] } = modelResults;
+  const { metrics = {}, model_info = {} } = modelResults;
   const modelType = model_info.type;
 
   const formatNumber = (num) => typeof num === 'number' ? num.toFixed(4) : num;
 
+  // Garantir nomes consistentes
+  const mse = metrics.mse ?? metrics.average_mse;
   const rmse = metrics.rmse ?? metrics.average_rmse;
+  const mae = metrics.mae ?? metrics.average_mae;
   const r2 = metrics.r2 ?? metrics.average_r2;
 
   return (
@@ -58,8 +61,16 @@ const Results = ({ modelResults, handleDownloadResults, setActiveStep }) => {
           {modelType === 'regression' && (
             <>
               <div className="bg-blue-50 p-3 rounded-lg text-center">
+                <p className="text-sm text-gray-600">MSE</p>
+                <p className="text-xl font-bold text-blue-700">{formatNumber(mse)}</p>
+              </div>
+              <div className="bg-blue-50 p-3 rounded-lg text-center">
                 <p className="text-sm text-gray-600">RMSE</p>
                 <p className="text-xl font-bold text-blue-700">{formatNumber(rmse)}</p>
+              </div>
+              <div className="bg-blue-50 p-3 rounded-lg text-center">
+                <p className="text-sm text-gray-600">MAE</p>
+                <p className="text-xl font-bold text-blue-700">{formatNumber(mae)}</p>
               </div>
               <div className="bg-green-50 p-3 rounded-lg text-center">
                 <p className="text-sm text-gray-600">R²</p>
@@ -120,55 +131,6 @@ const Results = ({ modelResults, handleDownloadResults, setActiveStep }) => {
           </table>
         </div>
       )}
-
-      {/* Coeficientes (Regressão Linear) */}
-      {modelType === 'regression' && model_info.coefficients && (
-        <div className="bg-white p-4 rounded-lg shadow mb-6">
-          <h4 className="text-lg font-medium mb-3">Coeficientes</h4>
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
-              <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500">Feature</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500">Coeficiente</th>
-              </tr>
-            </thead>
-            <tbody>
-              {Object.entries(model_info.coefficients)
-                .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
-                .map(([feature, coef], index) => (
-                  <tr key={index}>
-                    <td className="px-6 py-4 text-sm">{feature}</td>
-                    <td className={`px-6 py-4 text-sm ${coef > 0 ? 'text-green-600' : 'text-red-600'}`}>
-                      {formatNumber(coef)}
-                    </td>
-                  </tr>
-                ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {/* Previsões */}
-      <div className="bg-white p-4 rounded-lg shadow mb-6">
-        <h4 className="text-lg font-medium mb-3">Amostra de Previsões</h4>
-        <table className="min-w-full divide-y divide-gray-200">
-          <thead className="bg-gray-50">
-            <tr>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500">Índice</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500">Previsão</th>
-            </tr>
-          </thead>
-          <tbody>
-            {predictions.slice(0, 10).map((pred, index) => (
-              <tr key={index}>
-                <td className="px-6 py-4 text-sm">{index}</td>
-                <td className="px-6 py-4 text-sm">{formatNumber(pred)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <p className="mt-2 text-xs text-gray-500">Mostrando 10 de {predictions.length} previsões.</p>
-      </div>
 
       {/* Botões */}
       <div className="mt-6 flex justify-end space-x-3">

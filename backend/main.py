@@ -173,49 +173,49 @@ async def generate_eda():
 @app.post("/preprocess/")
 async def preprocess_data(options: PreprocessingOptions):
     global current_data, processed_data
-    
+
     if current_data is None:
         raise HTTPException(status_code=404, detail="Nenhum dado foi carregado")
-    
+
     try:
         # Criar uma cópia para não modificar os dados originais
         df = current_data.copy()
         preprocessing_steps = []
-        
+
         # 1. Remover colunas especificadas
         if options.drop_columns:
             df = df.drop(columns=[col for col in options.drop_columns if col in df.columns])
             preprocessing_steps.append(f"Removidas colunas: {', '.join(options.drop_columns)}")
-        
+
         # 2. Tratar valores ausentes
         na_count_before = df.isnull().sum().sum()
-        
+
         if options.fill_na_method == "mean":
             for col in df.select_dtypes(include=[np.number]).columns:
                 df[col] = df[col].fillna(df[col].mean())
             preprocessing_steps.append("Valores ausentes preenchidos com a média")
-        
+
         elif options.fill_na_method == "median":
             for col in df.select_dtypes(include=[np.number]).columns:
                 df[col] = df[col].fillna(df[col].median())
             preprocessing_steps.append("Valores ausentes preenchidos com a mediana")
-        
+
         elif options.fill_na_method == "mode":
             for col in df.columns:
                 df[col] = df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else None)
             preprocessing_steps.append("Valores ausentes preenchidos com a moda")
-        
+
         elif options.fill_na_method == "value" and options.fill_na_value is not None:
             df = df.fillna(options.fill_na_value)
             preprocessing_steps.append(f"Valores ausentes preenchidos com {options.fill_na_value}")
-        
+
         elif options.fill_na_method == "drop":
             df = df.dropna()
             preprocessing_steps.append("Linhas com valores ausentes foram removidas")
-        
+
         na_count_after = df.isnull().sum().sum()
         preprocessing_steps.append(f"Valores ausentes tratados: {na_count_before - na_count_after}")
-        
+
         # 3. Remover outliers usando o método IQR
         if options.remove_outliers:
             rows_before = len(df)
@@ -228,7 +228,7 @@ async def preprocess_data(options: PreprocessingOptions):
                 df = df[(df[col] >= lower_bound) & (df[col] <= upper_bound)]
             rows_after = len(df)
             preprocessing_steps.append(f"Outliers removidos: {rows_before - rows_after} linhas")
-        
+
         # 4. Normalizar dados numéricos
         if options.normalize:
             numeric_cols = df.select_dtypes(include=[np.number]).columns
@@ -237,15 +237,22 @@ async def preprocess_data(options: PreprocessingOptions):
                 df[numeric_cols] = scaler.fit_transform(df[numeric_cols])
                 preprocessing_steps.append("Dados numéricos normalizados (StandardScaler)")
 
-        # 5. Criar variável alvo binária: target_class (1 se próximo close > atual, senão 0)
+        # 5. Criar variáveis-alvo:
         if "close" in df.columns:
+            # Classificação: vai subir ou cair?
             df["target_class"] = (df["close"].shift(-1) > df["close"]).astype(int)
-            df = df.dropna()  # remove última linha com NaN após shift
             preprocessing_steps.append("Criada coluna 'target_class' (1 = alta, 0 = baixa)")
+
+            # Regressão: valor do próximo close
+            df["target_close"] = df["close"].shift(-1)
+            preprocessing_steps.append("Criada coluna 'target_close' (valor do próximo close)")
+
+            # Remover últimas linhas com NaN gerado pelo shift
+            df = df.dropna(subset=["target_class", "target_close"])
 
         # Armazenar os dados processados
         processed_data = df
-        
+
         # Preparar preview dos dados processados
         preview = {
             "columns": df.columns.tolist(),
@@ -253,11 +260,12 @@ async def preprocess_data(options: PreprocessingOptions):
             "shape": list(df.shape),
             "preprocessing_steps": preprocessing_steps
         }
-        
+
         return preview
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro no pré-processamento: {str(e)}")
+
 
 @app.post("/predict/")
 async def predict(request: PredictionRequest):
@@ -267,18 +275,23 @@ async def predict(request: PredictionRequest):
         raise HTTPException(status_code=404, detail="Nenhum dado processado disponível")
 
     try:
-        # Para classificação, usa 'target_class' se nenhum target for fornecido
+        # Se for classification, usa target_class por padrão
         if request.model_type == "classification" and not request.target_column:
             if "target_class" not in processed_data.columns:
                 raise HTTPException(status_code=400, detail="Coluna 'target_class' não encontrada. Execute o pré-processamento.")
             request.target_column = "target_class"
 
-        # Validação das colunas
+        # Se for regression, usa target_close por padrão
+        if request.model_type == "regression" and not request.target_column:
+            if "target_close" not in processed_data.columns:
+                raise HTTPException(status_code=400, detail="Coluna 'target_close' não encontrada. Execute o pré-processamento.")
+            request.target_column = "target_close"
+
+        # Validação
         for col in [request.target_column] + request.feature_columns:
             if col not in processed_data.columns:
                 raise HTTPException(status_code=400, detail=f"Coluna {col} não encontrada nos dados")
 
-        # Separar os dados
         X = processed_data[request.feature_columns]
         y = processed_data[request.target_column]
 
@@ -289,9 +302,10 @@ async def predict(request: PredictionRequest):
             "target": request.target_column
         }
 
+        from sklearn.model_selection import TimeSeriesSplit
+
         if request.model_type == "regression":
             from sklearn.linear_model import LinearRegression
-            from sklearn.model_selection import TimeSeriesSplit
             from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
             tscv = TimeSeriesSplit(n_splits=5)
@@ -310,18 +324,23 @@ async def predict(request: PredictionRequest):
                 y_preds.extend(y_pred)
                 y_tests.extend(y_test)
 
+                mse = mean_squared_error(y_test, y_pred)
+                rmse = np.sqrt(mse)
+                mae = mean_absolute_error(y_test, y_pred)
+                r2 = r2_score(y_test, y_pred)
+
                 folds.append({
-                    "mse": mean_squared_error(y_test, y_pred),
-                    "rmse": np.sqrt(mean_squared_error(y_test, y_pred)),
-                    "mae": mean_absolute_error(y_test, y_pred),
-                    "r2": r2_score(y_test, y_pred)
+                    "mse": mse,
+                    "rmse": rmse,
+                    "mae": mae,
+                    "r2": r2
                 })
 
             metrics = {
-                "average_mse": float(np.mean([f["mse"] for f in folds])),
-                "average_rmse": float(np.mean([f["rmse"] for f in folds])),
-                "average_mae": float(np.mean([f["mae"] for f in folds])),
-                "average_r2": float(np.mean([f["r2"] for f in folds])),
+                "mse": float(np.mean([f["mse"] for f in folds])),
+                "rmse": float(np.mean([f["rmse"] for f in folds])),
+                "mae": float(np.mean([f["mae"] for f in folds])),
+                "r2": float(np.mean([f["r2"] for f in folds])),
                 "folds": folds
             }
 
@@ -332,40 +351,74 @@ async def predict(request: PredictionRequest):
 
         elif request.model_type == "classification":
             from sklearn.linear_model import LogisticRegression
-            from sklearn.model_selection import train_test_split
             from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+            tscv = TimeSeriesSplit(n_splits=5)
+            folds = []
+            y_preds = []
+            y_tests = []
 
-            model = LogisticRegression(max_iter=1000)
-            model.fit(X_train, y_train)
-            y_pred = model.predict(X_test)
+            for train_idx, test_idx in tscv.split(X):
+                X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+                y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+
+                model = LogisticRegression(max_iter=1000)
+                model.fit(X_train, y_train)
+                y_pred = model.predict(X_test)
+
+                y_preds.extend(y_pred)
+                y_tests.extend(y_test)
+
+                folds.append({
+                    "accuracy": accuracy_score(y_test, y_pred),
+                    "precision": precision_score(y_test, y_pred, average='weighted'),
+                    "recall": recall_score(y_test, y_pred, average='weighted'),
+                    "f1": f1_score(y_test, y_pred, average='weighted')
+                })
 
             metrics = {
-                "accuracy": float(accuracy_score(y_test, y_pred)),
-                "precision": float(precision_score(y_test, y_pred, average='weighted')),
-                "recall": float(recall_score(y_test, y_pred, average='weighted')),
-                "f1": float(f1_score(y_test, y_pred, average='weighted'))
+                "accuracy": float(np.mean([f["accuracy"] for f in folds])),
+                "precision": float(np.mean([f["precision"] for f in folds])),
+                "recall": float(np.mean([f["recall"] for f in folds])),
+                "f1": float(np.mean([f["f1"] for f in folds])),
+                "folds": folds
             }
 
             model_info["classes"] = model.classes_.tolist()
 
         elif request.model_type == "random_forest":
             from sklearn.ensemble import RandomForestClassifier
-            from sklearn.model_selection import train_test_split
             from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+            tscv = TimeSeriesSplit(n_splits=5)
+            folds = []
+            y_preds = []
+            y_tests = []
 
-            model = RandomForestClassifier(n_estimators=100, random_state=42)
-            model.fit(X_train, y_train)
-            y_pred = model.predict(X_test)
+            for train_idx, test_idx in tscv.split(X):
+                X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+                y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+
+                model = RandomForestClassifier(n_estimators=100, random_state=42)
+                model.fit(X_train, y_train)
+                y_pred = model.predict(X_test)
+
+                y_preds.extend(y_pred)
+                y_tests.extend(y_test)
+
+                folds.append({
+                    "accuracy": accuracy_score(y_test, y_pred),
+                    "precision": precision_score(y_test, y_pred, average='weighted'),
+                    "recall": recall_score(y_test, y_pred, average='weighted'),
+                    "f1": f1_score(y_test, y_pred, average='weighted')
+                })
 
             metrics = {
-                "accuracy": float(accuracy_score(y_test, y_pred)),
-                "precision": float(precision_score(y_test, y_pred, average='weighted')),
-                "recall": float(recall_score(y_test, y_pred, average='weighted')),
-                "f1": float(f1_score(y_test, y_pred, average='weighted'))
+                "accuracy": float(np.mean([f["accuracy"] for f in folds])),
+                "precision": float(np.mean([f["precision"] for f in folds])),
+                "recall": float(np.mean([f["recall"] for f in folds])),
+                "f1": float(np.mean([f["f1"] for f in folds])),
+                "folds": folds
             }
 
             model_info["feature_importance"] = {
@@ -376,7 +429,7 @@ async def predict(request: PredictionRequest):
         else:
             raise HTTPException(status_code=400, detail=f"Tipo de modelo não suportado: {request.model_type}")
 
-        # Salvar o modelo treinado
+        # Salvar modelo
         model_filename = f"{request.model_type}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.pkl"
         model_path = os.path.join(MODELS_DIR, model_filename)
         joblib.dump(model, model_path)
