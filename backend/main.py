@@ -268,19 +268,18 @@ async def predict(request: PredictionRequest):
         raise HTTPException(status_code=404, detail="Nenhum dado processado disponível")
 
     try:
-        # Se for classification, usa target_class por padrão
+        # Definir coluna alvo padrão
         if request.model_type == "classification" and not request.target_column:
             if "target_class" not in processed_data.columns:
                 raise HTTPException(status_code=400, detail="Coluna 'target_class' não encontrada. Execute o pré-processamento.")
             request.target_column = "target_class"
 
-        # Se for regression, usa target_close por padrão
         if request.model_type == "regression" and not request.target_column:
             if "target_close" not in processed_data.columns:
                 raise HTTPException(status_code=400, detail="Coluna 'target_close' não encontrada. Execute o pré-processamento.")
             request.target_column = "target_close"
 
-        # Validação
+        # Validar colunas
         for col in [request.target_column] + request.feature_columns:
             if col not in processed_data.columns:
                 raise HTTPException(status_code=400, detail=f"Coluna {col} não encontrada nos dados")
@@ -288,9 +287,16 @@ async def predict(request: PredictionRequest):
         X = processed_data[request.feature_columns]
         y = processed_data[request.target_column]
 
-        # Aplicar StandardScaler novamente se necessário
-        scaler = StandardScaler()
-        X = scaler.fit_transform(X)
+        # Escalar X (features)
+        scaler_X = StandardScaler()
+        X_scaled = scaler_X.fit_transform(X)
+
+        # Escalar y se for regressão
+        if request.model_type == "regression":
+            scaler_y = StandardScaler()
+            y_scaled = scaler_y.fit_transform(y.values.reshape(-1, 1)).flatten()
+        else:
+            y_scaled = y  # para classificadores, usa direto
 
         model = None
         model_info = {
@@ -301,18 +307,18 @@ async def predict(request: PredictionRequest):
 
         from sklearn.model_selection import TimeSeriesSplit
 
+        tscv = TimeSeriesSplit(n_splits=5)
+        folds = []
+        y_preds = []
+        y_tests = []
+
         if request.model_type == "regression":
             from sklearn.linear_model import LinearRegression
             from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
-            tscv = TimeSeriesSplit(n_splits=5)
-            folds = []
-            y_preds = []
-            y_tests = []
-
-            for train_idx, test_idx in tscv.split(X):
-                X_train, X_test = X[train_idx], X[test_idx]
-                y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+            for train_idx, test_idx in tscv.split(X_scaled):
+                X_train, X_test = X_scaled[train_idx], X_scaled[test_idx]
+                y_train, y_test = y_scaled[train_idx], y_scaled[test_idx]
 
                 model = LinearRegression()
                 model.fit(X_train, y_train)
@@ -321,16 +327,11 @@ async def predict(request: PredictionRequest):
                 y_preds.extend(y_pred)
                 y_tests.extend(y_test)
 
-                mse = mean_squared_error(y_test, y_pred)
-                rmse = np.sqrt(mse)
-                mae = mean_absolute_error(y_test, y_pred)
-                r2 = r2_score(y_test, y_pred)
-
                 folds.append({
-                    "mse": mse,
-                    "rmse": rmse,
-                    "mae": mae,
-                    "r2": r2
+                    "mse": mean_squared_error(y_test, y_pred),
+                    "rmse": np.sqrt(mean_squared_error(y_test, y_pred)),
+                    "mae": mean_absolute_error(y_test, y_pred),
+                    "r2": r2_score(y_test, y_pred)
                 })
 
             metrics = {
@@ -350,13 +351,8 @@ async def predict(request: PredictionRequest):
             from sklearn.linear_model import LogisticRegression
             from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
-            tscv = TimeSeriesSplit(n_splits=5)
-            folds = []
-            y_preds = []
-            y_tests = []
-
-            for train_idx, test_idx in tscv.split(X):
-                X_train, X_test = X[train_idx], X[test_idx]
+            for train_idx, test_idx in tscv.split(X_scaled):
+                X_train, X_test = X_scaled[train_idx], X_scaled[test_idx]
                 y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
                 model = LogisticRegression(max_iter=1000)
@@ -387,13 +383,8 @@ async def predict(request: PredictionRequest):
             from sklearn.ensemble import RandomForestClassifier
             from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
-            tscv = TimeSeriesSplit(n_splits=5)
-            folds = []
-            y_preds = []
-            y_tests = []
-
-            for train_idx, test_idx in tscv.split(X):
-                X_train, X_test = X[train_idx], X[test_idx]
+            for train_idx, test_idx in tscv.split(X_scaled):
+                X_train, X_test = X_scaled[train_idx], X_scaled[test_idx]
                 y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
                 model = RandomForestClassifier(n_estimators=100, random_state=42)
@@ -431,14 +422,20 @@ async def predict(request: PredictionRequest):
         model_path = os.path.join(MODELS_DIR, model_filename)
         joblib.dump(model, model_path)
 
-        # Previsões para todo o dataset
-        all_predictions = model.predict(X)
+        # Previsão final
+        all_predictions = model.predict(X_scaled)
+        next_prediction_scaled = all_predictions[-1]
 
-        # Previsão do próximo candle (última linha dos dados)
-        next_prediction = all_predictions[-1]
+        if request.model_type == "regression":
+            try:
+                next_prediction_real = scaler_y.inverse_transform([[next_prediction_scaled]])[0][0]
+            except:
+                next_prediction_real = float(next_prediction_scaled)
+        else:
+            next_prediction_real = float(next_prediction_scaled)
 
         return {
-            "prediction": float(next_prediction),
+            "prediction": float(next_prediction_real),
             "predictions": all_predictions.tolist(),
             "metrics": metrics,
             "model_info": model_info,
@@ -447,6 +444,7 @@ async def predict(request: PredictionRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro na previsão: {str(e)}")
+
 
 # Rota para obter resultados com previsões para download
 @app.get("/download-results/")
