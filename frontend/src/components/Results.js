@@ -15,12 +15,11 @@ const Results = ({ modelResults, handleDownloadResults, setActiveStep }) => {
     );
   }
 
-  const { metrics = {}, model_info = {} } = modelResults;
+  const { metrics = {}, model_info = {}, prediction } = modelResults;
   const modelType = model_info.type;
 
   const formatNumber = (num) => typeof num === 'number' ? num.toFixed(4) : num;
 
-  // Garantir nomes consistentes
   const mse = metrics.mse ?? metrics.average_mse;
   const rmse = metrics.rmse ?? metrics.average_rmse;
   const mae = metrics.mae ?? metrics.average_mae;
@@ -33,6 +32,20 @@ const Results = ({ modelResults, handleDownloadResults, setActiveStep }) => {
         <h3 className="text-lg font-medium mb-2">Resultados do Modelo</h3>
         <p className="text-sm text-gray-600">Veja os resultados do treinamento e as métricas de desempenho do modelo.</p>
       </div>
+
+      {/* Previsão do Próximo Candle */}
+      {prediction !== undefined && (
+        <div className="bg-white p-4 rounded-lg shadow mb-6">
+          <h4 className="text-lg font-medium mb-3">Previsão do Próximo Candle</h4>
+          <div className="text-center text-2xl font-bold text-blue-700">
+            {modelType === 'regression'
+              ? `${formatNumber(prediction)} (preço previsto)`
+              : prediction === 1
+                ? '⬆️ Alta prevista'
+                : '⬇️ Queda prevista'}
+          </div>
+        </div>
+      )}
 
       {/* Informações do Modelo */}
       <div className="bg-white p-4 rounded-lg shadow mb-6">
