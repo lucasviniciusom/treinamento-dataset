@@ -437,7 +437,11 @@ async def predict(request: PredictionRequest):
         # Previsões para todo o dataset
         all_predictions = model.predict(X)
 
+        # Previsão do próximo candle (última linha dos dados)
+        next_prediction = all_predictions[-1]
+
         return {
+            "prediction": float(next_prediction),
             "predictions": all_predictions.tolist(),
             "metrics": metrics,
             "model_info": model_info,
@@ -446,8 +450,6 @@ async def predict(request: PredictionRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro na previsão: {str(e)}")
-
-
 
 # Rota para obter resultados com previsões para download
 @app.get("/download-results/")
