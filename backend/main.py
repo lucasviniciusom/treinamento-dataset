@@ -24,7 +24,7 @@ app = FastAPI(
 # Configurar CORS para permitir requisições do frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Em produção, especificar apenas a origem do frontend
+   allow_origins=["https://treinamento-dataset-4.onrender.com"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
