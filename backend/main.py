@@ -24,7 +24,7 @@ app = FastAPI(
 # Configurar CORS para permitir requisições do frontend
 app.add_middleware(
     CORSMiddleware,
-   allow_origins=["https://treinamento-dataset-4.onrender.com"],
+    allow_origins=["https://treinamento-dataset-4.onrender.com"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -34,9 +34,10 @@ app.add_middleware(
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 os.makedirs(MODELS_DIR, exist_ok=True)
 
-# Variável global para armazenar o DataFrame atual
+# Variáveis globais
 current_data = None
 processed_data = None
+scaler_global = None  # <- NOVO: para manter o scaler aplicado
 
 # Modelos de dados para as requisições e respostas
 class DataPreview(BaseModel):
@@ -71,24 +72,21 @@ async def root():
 @app.post("/upload-csv/")
 async def upload_csv(file: UploadFile = File(...)):
     global current_data
-    
-    # Verificar se o arquivo é CSV
+
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="Apenas arquivos CSV são aceitos")
-    
-    # Ler o arquivo CSV
+
     try:
         contents = await file.read()
         buffer = io.StringIO(contents.decode('utf-8'))
         current_data = pd.read_csv(buffer)
-        
-        # Preparar preview dos dados
+
         preview = {
             "columns": current_data.columns.tolist(),
             "data": current_data.head(10).values.tolist(),
             "shape": list(current_data.shape)
         }
-        
+
         return preview
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao processar o arquivo: {str(e)}")
@@ -97,11 +95,10 @@ async def upload_csv(file: UploadFile = File(...)):
 @app.get("/data-info/")
 async def get_data_info():
     global current_data
-    
+
     if current_data is None:
         raise HTTPException(status_code=404, detail="Nenhum dado foi carregado")
-    
-    # Informações básicas sobre o DataFrame
+
     info = {
         "shape": current_data.shape,
         "columns": current_data.columns.tolist(),
@@ -110,7 +107,7 @@ async def get_data_info():
         "numeric_columns": current_data.select_dtypes(include=[np.number]).columns.tolist(),
         "categorical_columns": current_data.select_dtypes(include=['object']).columns.tolist()
     }
-    
+
     return info
 
 # Função auxiliar para gerar gráficos como base64
@@ -178,14 +175,14 @@ async def preprocess_data(options: PreprocessingOptions):
         raise HTTPException(status_code=404, detail="Nenhum dado foi carregado")
 
     try:
-        # Criar uma cópia para não modificar os dados originais
         df = current_data.copy()
         preprocessing_steps = []
 
         # 1. Remover colunas especificadas
         if options.drop_columns:
-            df = df.drop(columns=[col for col in options.drop_columns if col in df.columns])
-            preprocessing_steps.append(f"Removidas colunas: {', '.join(options.drop_columns)}")
+            existing_cols = [col for col in options.drop_columns if col in df.columns]
+            df = df.drop(columns=existing_cols)
+            preprocessing_steps.append(f"Removidas colunas: {', '.join(existing_cols)}")
 
         # 2. Tratar valores ausentes
         na_count_before = df.isnull().sum().sum()
@@ -214,9 +211,9 @@ async def preprocess_data(options: PreprocessingOptions):
             preprocessing_steps.append("Linhas com valores ausentes foram removidas")
 
         na_count_after = df.isnull().sum().sum()
-        preprocessing_steps.append(f"Valores ausentes tratados: {na_count_before - na_count_after}")
+        preprocessing_steps.append(f"Valores ausentes tratados: {int(na_count_before - na_count_after)}")
 
-        # 3. Remover outliers usando o método IQR
+        # 3. Remover outliers (IQR)
         if options.remove_outliers:
             rows_before = len(df)
             for col in df.select_dtypes(include=[np.number]).columns:
@@ -229,43 +226,39 @@ async def preprocess_data(options: PreprocessingOptions):
             rows_after = len(df)
             preprocessing_steps.append(f"Outliers removidos: {rows_before - rows_after} linhas")
 
-        # 4. Normalizar dados numéricos
+        # 4. Normalização
         if options.normalize:
             numeric_cols = df.select_dtypes(include=[np.number]).columns
             if not numeric_cols.empty:
                 scaler = StandardScaler()
                 df[numeric_cols] = scaler.fit_transform(df[numeric_cols])
-                preprocessing_steps.append("Dados numéricos normalizados (StandardScaler)")
 
-        # 5. Criar variáveis-alvo:
+                # Salvar o scaler para uso futuro nas previsões
+                scaler_path = os.path.join(MODELS_DIR, "scaler.pkl")
+                joblib.dump(scaler, scaler_path)
+
+                preprocessing_steps.append("Dados numéricos normalizados com StandardScaler")
+
+        # 5. Criar colunas de previsão
         if "close" in df.columns:
-            # Classificação: vai subir ou cair?
             df["target_class"] = (df["close"].shift(-1) > df["close"]).astype(int)
-            preprocessing_steps.append("Criada coluna 'target_class' (1 = alta, 0 = baixa)")
-
-            # Regressão: valor do próximo close
             df["target_close"] = df["close"].shift(-1)
-            preprocessing_steps.append("Criada coluna 'target_close' (valor do próximo close)")
-
-            # Remover últimas linhas com NaN gerado pelo shift
             df = df.dropna(subset=["target_class", "target_close"])
+            preprocessing_steps.append("Criadas colunas 'target_class' e 'target_close' com base no fechamento futuro")
 
         # Armazenar os dados processados
         processed_data = df
 
-        # Preparar preview dos dados processados
-        preview = {
+        # Retornar preview
+        return {
             "columns": df.columns.tolist(),
             "data": df.head(10).values.tolist(),
             "shape": list(df.shape),
             "preprocessing_steps": preprocessing_steps
         }
 
-        return preview
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro no pré-processamento: {str(e)}")
-
 
 @app.post("/predict/")
 async def predict(request: PredictionRequest):
@@ -295,6 +288,10 @@ async def predict(request: PredictionRequest):
         X = processed_data[request.feature_columns]
         y = processed_data[request.target_column]
 
+        # Aplicar StandardScaler novamente se necessário
+        scaler = StandardScaler()
+        X = scaler.fit_transform(X)
+
         model = None
         model_info = {
             "type": request.model_type,
@@ -314,7 +311,7 @@ async def predict(request: PredictionRequest):
             y_tests = []
 
             for train_idx, test_idx in tscv.split(X):
-                X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+                X_train, X_test = X[train_idx], X[test_idx]
                 y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
                 model = LinearRegression()
@@ -359,7 +356,7 @@ async def predict(request: PredictionRequest):
             y_tests = []
 
             for train_idx, test_idx in tscv.split(X):
-                X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+                X_train, X_test = X[train_idx], X[test_idx]
                 y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
                 model = LogisticRegression(max_iter=1000)
@@ -396,7 +393,7 @@ async def predict(request: PredictionRequest):
             y_tests = []
 
             for train_idx, test_idx in tscv.split(X):
-                X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+                X_train, X_test = X[train_idx], X[test_idx]
                 y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
                 model = RandomForestClassifier(n_estimators=100, random_state=42)
