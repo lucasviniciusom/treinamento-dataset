@@ -226,18 +226,18 @@ async def preprocess_data(options: PreprocessingOptions):
             rows_after = len(df)
             preprocessing_steps.append(f"Outliers removidos: {rows_before - rows_after} linhas")
 
-        # 4. Normalização
-        if options.normalize:
-            numeric_cols = df.select_dtypes(include=[np.number]).columns
-            if not numeric_cols.empty:
-                scaler = StandardScaler()
-                df[numeric_cols] = scaler.fit_transform(df[numeric_cols])
-
-                # Salvar o scaler para uso futuro nas previsões
-                scaler_path = os.path.join(MODELS_DIR, "scaler.pkl")
-                joblib.dump(scaler, scaler_path)
-
-                preprocessing_steps.append("Dados numéricos normalizados com StandardScaler")
+        # 4. Normalização (comentada)
+        # if options.normalize:
+        #     numeric_cols = df.select_dtypes(include=[np.number]).columns
+        #     if not numeric_cols.empty:
+        #         scaler = StandardScaler()
+        #         df[numeric_cols] = scaler.fit_transform(df[numeric_cols])
+        #
+        #         # Salvar o scaler para uso futuro nas previsões
+        #         scaler_path = os.path.join(MODELS_DIR, "scaler.pkl")
+        #         joblib.dump(scaler, scaler_path)
+        #
+        #         preprocessing_steps.append("Dados numéricos normalizados com StandardScaler")
 
         # 5. Criar colunas de previsão
         if "close" in df.columns:
@@ -259,6 +259,7 @@ async def preprocess_data(options: PreprocessingOptions):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro no pré-processamento: {str(e)}")
+
 
 @app.post("/predict/")
 async def predict(request: PredictionRequest):
